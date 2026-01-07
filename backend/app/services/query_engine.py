@@ -76,7 +76,8 @@ class QueryEngine:
         base_query: str,
         group_by: List[str],
         metrics: List[Dict[str, Any]],
-        filters: Optional[Dict[str, Any]] = None
+        filters: Optional[Dict[str, Any]] = None,
+        sort: Optional[List[Dict[str, str]]] = None # List of {colId: str, sort: 'asc'|'desc'}
     ) -> tuple[bytes, int, float]:
         """
         Execute pivot query with ROLLUP for correct aggregations
@@ -87,7 +88,8 @@ class QueryEngine:
         try:
             import connectorx as cx
             
-            is_mssql = "mssql" in conn_string
+            is_mssql = "mssql" in conn_string.lower()
+            is_mysql = "mysql" in conn_string.lower()
             is_mysql = "mysql" in conn_string
             
             def quote(col: str) -> str:
@@ -157,35 +159,66 @@ class QueryEngine:
             if group_by:
                 group_clause = ', '.join(quote(col) for col in group_by)
                 group_by_sql = f"GROUP BY {group_clause}"
-                # Simple sort by keys
-                order_by_sql = f"ORDER BY {group_clause}"
             else:
                 group_by_sql = ""
-                order_by_sql = ""
+
+            # Build ORDER BY
+            order_by_sql = ""
+            if sort:
+                order_clauses = []
+                for s in sort:
+                    col = quote(s['colId'])
+                    direction = s['sort'].upper()
+                    order_clauses.append(f"{col} {direction}")
+                order_by_sql = "ORDER BY " + ", ".join(order_clauses)
+            elif group_by:
+                # Default sort by keys
+                group_clause = ', '.join(quote(col) for col in group_by)
+                order_by_sql = f"ORDER BY {group_clause}"
+
             
-            # Build WHERE clause from filters
+            # Build WHERE and HAVING clauses
             where_sql = ""
+            having_sql = ""
+            
+            # Helper to check if a field is a metric (for HAVING)
+            metric_names = {m.get('name', m.get('field')) for m in metrics}
+            
             if filters:
-                conditions = []
+                where_conditions = []
+                having_conditions = []
+                
                 for field, filter_def in filters.items():
-                    col = quote(field)
                     val = filter_def['value']
-                    # Using parameter substitution would be better, but cx.read_sql takes string
-                    # Basic sanitization
+                    # Sanitization
                     if isinstance(val, str):
-                        # Simple escape for single quotes
                         val = val.replace("'", "''")
-                    
+                        
+                    # Determine Operator
+                    op = ""
                     if filter_def.get('type') == 'contains':
-                        conditions.append(f"{col} LIKE '%{val}%'")
+                        op = f"LIKE '%{val}%'"
                     elif filter_def.get('type') == 'equals':
-                        conditions.append(f"{col} = '{val}'")
+                        op = f"= '{val}'"
                     elif filter_def.get('type') == 'greaterThan':
-                        conditions.append(f"{col} > {val}")
+                        op = f"> {val}"
                     elif filter_def.get('type') == 'lessThan':
-                        conditions.append(f"{col} < {val}")
-                if conditions:
-                    where_sql = "WHERE " + " AND ".join(conditions)
+                        op = f"< {val}"
+                    else:
+                        continue # Skip unknown
+
+                    # Check if Metric or Dimension
+                    if field in metric_names:
+                        # HAVING - needs the aggregated name quoted
+                        having_conditions.append(f"{quote(field)} {op}")
+                    else:
+                        # WHERE - needs the original simple column name quoted
+                        where_conditions.append(f"{quote(field)} {op}")
+
+                if where_conditions:
+                    where_sql = "WHERE " + " AND ".join(where_conditions)
+                if having_conditions:
+                    having_sql = "HAVING " + " AND ".join(having_conditions)
             
             # Final query
             sql = f"""
@@ -193,6 +226,7 @@ class QueryEngine:
                 FROM ({base_query}) AS base_data
                 {where_sql}
                 {group_by_sql}
+                {having_sql}
                 {order_by_sql}
             """
             

@@ -89,10 +89,18 @@ export function buildPivotHierarchy(
         });
     });
 
+    // Determine return value based on if we have groups
+    let resultRows = rootNode.subRows;
+    if (groupBy.length === 0) {
+        // If NO groups, we return the Grand Total Root as the single data row
+        resultRows = [rootNode];
+    }
+    
     // 3. Flatten Aggregates into Node Properties for the Table
     // The Table component expects properties like "2022_Sales" directly on the node object.
 
     const colMaxLengths: Record<string, number> = {};
+
     const trackLength = (key: string, val: any) => {
         const len = String(val??"").length;
         if (!colMaxLengths[key] || len > colMaxLengths[key]) {

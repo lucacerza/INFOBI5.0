@@ -54,13 +54,15 @@ async def execute_pivot(
     report, connection = row
     
     # Build config hash for caching
+    # INCLUDE NEW PARAMS: sort, HAVING logic implicitly via metrics/filters
     config = {
         "query": report.query,
         "group_by": request.group_by,
         "split_by": request.split_by,
         "metrics": [m.model_dump() for m in request.metrics],
         "filters": request.filters,
-        "sort": request.sort
+        "sort": request.sort,
+        "mode": "lazy" # Differentiate from flat queries if needed
     }
     config_hash = QueryEngine.hash_config(config)
     
@@ -103,6 +105,7 @@ async def execute_pivot(
                         m['costField'] = am.get('costField')
                         break
         
+        try:
             # Combine group_by and split_by for the query to ensure we get all dimensions
             # We do NOT want ROLLUP from backend anymore, as frontend does the tree building.
             all_groups = (request.group_by or report.default_group_by or []) + (request.split_by or [])
@@ -114,7 +117,8 @@ async def execute_pivot(
                 report.query,
                 all_groups,
                 metrics,
-                request.filters
+                request.filters,
+                request.sort
             )
             
             elapsed = (time.perf_counter() - start_time) * 1000
