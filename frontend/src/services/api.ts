@@ -99,6 +99,10 @@ export const reportsApi = {
   refreshCache: async (id: number) => {
     const { data } = await api.post(`/reports/${id}/refresh-cache`);
     return data;
+  },
+  getColumnValues: async (id: number, column: string) => {
+    const { data } = await api.get(`/reports/${id}/column-values/${column}`);
+    return data;
   }
 };
 

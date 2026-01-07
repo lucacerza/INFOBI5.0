@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { reportsApi, exportApi } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
-import PerspectiveViewer from '../components/PerspectiveViewer';
+import CustomPivotViewer from '../components/CustomPivotViewer';
 import { 
   ArrowLeft, 
   Edit, 
@@ -147,9 +147,9 @@ export default function ReportViewerPage() {
         </div>
       </div>
       
-      {/* Perspective Viewer */}
-      <div className="flex-1 relative">
-        <PerspectiveViewer 
+      {/* Perspective Viewer REPLACED by Custom Pivot */}
+      <div className="flex-1 relative overflow-hidden">
+        <CustomPivotViewer 
           reportId={reportId}
           className="h-full"
         />

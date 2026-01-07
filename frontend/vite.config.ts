@@ -18,12 +18,6 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          'perspective': [
-            '@finos/perspective',
-            '@finos/perspective-viewer',
-            '@finos/perspective-viewer-datagrid',
-            '@finos/perspective-viewer-d3fc'
-          ],
           'vendor': ['react', 'react-dom', 'react-router-dom', 'axios', 'zustand']
         }
       }

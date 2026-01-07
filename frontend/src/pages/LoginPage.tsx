@@ -37,7 +37,7 @@ export default function LoginPage() {
             </div>
             <span className="text-3xl font-bold text-white">INFOBI</span>
           </div>
-          <p className="text-slate-400">Business Intelligence 4.0</p>
+          <p className="text-slate-400">Business Intelligence 5.0</p>
         </div>
         
         {/* Login card */}

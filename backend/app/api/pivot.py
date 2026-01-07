@@ -103,21 +103,29 @@ async def execute_pivot(
                         m['costField'] = am.get('costField')
                         break
         
-        # Execute pivot query
-        arrow_bytes, row_count, query_time = await QueryEngine.execute_pivot(
-            conn_string,
-            report.query,
-            request.group_by or report.default_group_by,
-            metrics,
-            request.filters
-        )
-        
-        elapsed = (time.perf_counter() - start_time) * 1000
-        logger.info(f"Pivot executed for report {report_id}: {row_count} rows in {elapsed:.1f}ms")
-        
-        # Cache result
-        if report.cache_enabled:
-            await cache.set_pivot(report_id, config_hash, arrow_bytes)
+            # Combine group_by and split_by for the query to ensure we get all dimensions
+            # We do NOT want ROLLUP from backend anymore, as frontend does the tree building.
+            all_groups = (request.group_by or report.default_group_by or []) + (request.split_by or [])
+            # Deduplicate just in case
+            all_groups = list(dict.fromkeys(all_groups))
+            
+            arrow_bytes, row_count, query_time = await QueryEngine.execute_pivot(
+                conn_string,
+                report.query,
+                all_groups,
+                metrics,
+                request.filters
+            )
+            
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.info(f"Pivot executed for report {report_id}: {row_count} rows in {elapsed:.1f}ms")
+            
+            # Cache result
+            if report.cache_enabled:
+                await cache.set_pivot(report_id, config_hash, arrow_bytes)
+        except Exception as e:
+            logger.error(f"Pivot Query Execution Failed: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Errore esecuzione query: {str(e)}")
     
     return Response(
         content=arrow_bytes,
@@ -166,13 +174,34 @@ async def get_pivot_schema(
         import connectorx as cx
         
         # Get just 1 row to infer schema
+        # Inject LIMIT/TOP directly to avoid subquery encapsulation
+        import re
+        q_clean = report.query.strip()
+        
         if connection.db_type == "mssql":
-            limit_query = f"SELECT TOP 1 * FROM ({report.query}) AS schema_query"
+            if not re.search(r"(?i)\bSELECT\s+TOP\b", q_clean):
+                 limit_query = re.sub(r"(?i)^\s*SELECT", "SELECT TOP 1", q_clean, count=1)
+            else:
+                 # If TOP is present, we still want to limit to 1 for schema check
+                 # Replace existing TOP N with TOP 1
+                 limit_query = re.sub(r"(?i)\bTOP\s+\d+", "TOP 1", q_clean, count=1)
         else:
-            limit_query = f"SELECT * FROM ({report.query}) AS schema_query LIMIT 1"
+            if not re.search(r"(?i)\bLIMIT\s+\d+", q_clean):
+                 if q_clean.endswith(';'):
+                    q_clean = q_clean[:-1]
+                 limit_query = f"{q_clean} LIMIT 1"
+            else:
+                 limit_query = re.sub(r"(?i)\bLIMIT\s+\d+", "LIMIT 1", q_clean)
         
         logger.info(f"Executing schema query for report {report_id}")
-        arrow_table = cx.read_sql(conn_string, limit_query, return_type="arrow")
+        
+        # Run sync connectorx in executor to avoid blocking main thread
+        import asyncio
+        loop = asyncio.get_running_loop()
+        arrow_table = await loop.run_in_executor(
+            None,
+            lambda: cx.read_sql(conn_string, limit_query, return_type="arrow")
+        )
         
         columns = []
         for field in arrow_table.schema:

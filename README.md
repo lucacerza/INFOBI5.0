@@ -1,4 +1,4 @@
-# INFOBI 4.0 - Business Intelligence per Industria 4.0
+# INFOBI 5.0 - Business Intelligence per Industria 5.0
 
 ## 🚀 Caratteristiche Principali
 

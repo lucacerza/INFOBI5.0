@@ -1,4 +1,4 @@
-# High-performance backend with:
+﻿# High-performance backend with:
 # - ConnectorX for 10x faster DB reads
 # - Redis/Dragonfly caching
 # - Arrow IPC streaming
@@ -40,3 +40,6 @@ apscheduler==3.10.4
 python-dotenv==1.0.0
 httpx==0.26.0
 orjson==3.9.12
+duckdb==0.9.2
+
+

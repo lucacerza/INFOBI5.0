@@ -1,6 +1,6 @@
 """
-INFOBI 4.0 - High Performance BI Platform
-Focus: Speed, Mobile, Industry 4.0
+INFOBI 5.0 - High Performance BI Platform
+Focus: Speed, Mobile, Industry 5.0
 """
 import logging
 from contextlib import asynccontextmanager
@@ -11,6 +11,7 @@ from fastapi.responses import ORJSONResponse
 
 from app.core.config import settings
 from app.db.database import init_db
+from app.services.warmup import WarmupService
 from app.api import auth, connections, reports, pivot, dashboards, export
 
 # Configure logging
@@ -20,16 +21,21 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize services on startup"""
-    logger.info("🚀 Starting INFOBI 4.0...")
+    logger.info("🚀 Starting INFOBI 5.0...")
     await init_db()
     logger.info("✅ Database initialized")
+    
+    # Warmup connections in background
+    import asyncio
+    asyncio.create_task(WarmupService.warmup_all_connections())
+    
     yield
-    logger.info("👋 Shutting down INFOBI 4.0")
+    logger.info("👋 Shutting down INFOBI 5.0")
 
 app = FastAPI(
-    title="INFOBI 4.0",
-    description="High Performance BI for Industry 4.0",
-    version="4.0.0",
+    title="INFOBI 5.0",
+    description="High Performance BI for Industry 5.0",
+    version="5.0.0",
     lifespan=lifespan,
     default_response_class=ORJSONResponse,  # Faster JSON serialization
 )

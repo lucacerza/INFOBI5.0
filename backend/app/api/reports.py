@@ -1,5 +1,6 @@
 """Reports API with high-performance data streaming"""
 import time
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -8,9 +9,11 @@ from pydantic import BaseModel
 from app.db.database import get_db, Report, Connection
 from app.core.deps import get_current_user, get_current_admin
 from app.core.security import decrypt_password
-from app.models.schemas import ReportCreate, ReportUpdate, ReportResponse
+from app.models.schemas import ReportCreate, ReportUpdate, ReportResponse, GridRequest, GridResponse, PivotDrillRequest
 from app.services.query_engine import QueryEngine
 from app.services.cache import cache
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -45,23 +48,173 @@ async def test_query(
             }
         )
         
-        # Wrap query with limit for testing
+        # Inject LIMIT/TOP directly to avoid subquery encapsulation
+        import re
+        q_clean = request.query.strip()
+        
         if connection.db_type == "mssql":
-            test_query = f"SELECT TOP 100 * FROM ({request.query}) AS test_query"
+            # Using Regex to inject TOP 100 after the first SELECT if not present
+            # Case insensitive, matching word boundary
+            if not re.search(r"(?i)\bSELECT\s+TOP\b", q_clean):
+                 test_query = re.sub(r"(?i)^\s*SELECT", "SELECT TOP 100", q_clean, count=1)
+            else:
+                 test_query = q_clean
         else:
-            test_query = f"SELECT * FROM ({request.query}) AS test_query LIMIT 100"
+            # For Postgres/MySQL/SQLite, append LIMIT 100 if not present
+            if not re.search(r"(?i)\bLIMIT\s+\d+", q_clean):
+                # Remove trailing semicolon if exists
+                if q_clean.endswith(';'):
+                    q_clean = q_clean[:-1]
+                test_query = f"{q_clean} LIMIT 100"
+            else:
+                test_query = q_clean
         
         # Execute
         arrow_table = cx.read_sql(conn_string, test_query, return_type="arrow")
+        
+        # Get sample data (first 50 rows) for preview
+        sample_rows = arrow_table.slice(0, 50).to_pylist()
         
         return {
             "success": True,
             "row_count": arrow_table.num_rows,
             "columns": [field.name for field in arrow_table.schema],
+            "sample_data": sample_rows,
             "message": "Query eseguita con successo"
         }
         
     except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{report_id}/grid", response_model=GridResponse)
+async def get_report_grid_data(
+    report_id: int,
+    request: GridRequest,
+    db: AsyncSession = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    """
+    Get paginated, sorted, and filtered data for a specific report.
+    Implements Server-Side Row Model.
+    """
+    # 1. Get Report
+    result = await db.execute(select(Report).where(Report.id == report_id))
+    report = result.scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report non trovato")
+        
+    # 2. Get Connection
+    result = await db.execute(select(Connection).where(Connection.id == report.connection_id))
+    connection = result.scalar_one_or_none()
+    if not connection:
+        raise HTTPException(status_code=404, detail="Connessione non trovata")
+        
+    try:
+        conn_string = QueryEngine.build_connection_string(
+            connection.db_type,
+            {
+                "host": connection.host,
+                "port": connection.port,
+                "database": connection.database,
+                "username": connection.username,
+                "password": decrypt_password(connection.password_encrypted)
+            }
+        )
+        
+        # 3. Execute Server-Side Query
+        rows, total_count, _ = await QueryEngine.execute_grid_query(
+            conn_string,
+            report.query,
+            request
+        )
+        
+        return {
+            "rows": rows,
+            "lastRow": total_count
+        }
+        
+    except Exception as e:
+        logger.error(f"Error executing grid query: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{report_id}/pivot-drill")
+async def get_pivot_drill_data(
+    report_id: int,
+    request: PivotDrillRequest,
+    db: AsyncSession = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    """
+    Get aggregated data specific to a tree node (Lazy Loading).
+    Returns children for the requested groupKeys path.
+    """
+    # 1. Get Report & Connection
+    result = await db.execute(select(Report).where(Report.id == report_id))
+    report = result.scalar_one_or_none()
+    if not report: raise HTTPException(status_code=404, detail="Report not found")
+        
+    result = await db.execute(select(Connection).where(Connection.id == report.connection_id))
+    connection = result.scalar_one_or_none()
+    if not connection: raise HTTPException(status_code=404, detail="Connessione non trovata")
+
+    try:
+        conn_string = QueryEngine.build_connection_string(
+            connection.db_type,
+            {
+                "host": connection.host,
+                "port": connection.port,
+                "database": connection.database,
+                "username": connection.username,
+                "password": decrypt_password(connection.password_encrypted)
+            }
+        )
+        
+        # 3. Execute Lazy Pivot
+        rows, count, _ = await QueryEngine.execute_pivot_drill(
+            conn_string,
+            report.query,
+            request
+        )
+        
+        return {"rows": rows, "count": count}
+        
+    except Exception as e:
+        logger.error(f"Error executing pivot drill: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/{report_id}/column-values/{column}")
+async def get_column_values(
+    report_id: int,
+    column: str,
+    db: AsyncSession = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    """Get distinct values for a specific column (for Filters or Pivot Headers)"""
+    result = await db.execute(select(Report).where(Report.id == report_id))
+    report = result.scalar_one_or_none()
+    if not report: raise HTTPException(status_code=404, detail="Report not found")
+        
+    result = await db.execute(select(Connection).where(Connection.id == report.connection_id))
+    connection = result.scalar_one_or_none()
+    if not connection: raise HTTPException(status_code=404, detail="Connessione non trovata")
+
+    try:
+        conn_string = QueryEngine.build_connection_string(
+            connection.db_type,
+            {
+                "host": connection.host,
+                "port": connection.port,
+                "database": connection.database,
+                "username": connection.username,
+                "password": decrypt_password(connection.password_encrypted)
+            }
+        )
+        
+        values = await QueryEngine.get_column_values(conn_string, report.query, column)
+        return values
+        
+    except Exception as e:
+        logger.error(f"Error fetching values: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("", response_model=List[ReportResponse])

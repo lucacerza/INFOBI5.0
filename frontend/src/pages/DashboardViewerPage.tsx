@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { dashboardsApi } from '../services/api';
-import PerspectiveViewer from '../components/PerspectiveViewer';
+import CustomPivotViewer from '../components/CustomPivotViewer';
 import { ArrowLeft, Loader2, Plus } from 'lucide-react';
 
 export default function DashboardViewerPage() {
@@ -63,7 +63,7 @@ export default function DashboardViewerPage() {
                   <h3 className="font-medium">{widget.title || `Report ${widget.report_id}`}</h3>
                 </div>
                 <div className="h-[calc(100%-52px)]">
-                  <PerspectiveViewer reportId={widget.report_id} />
+                  <CustomPivotViewer reportId={widget.report_id} className="h-full" />
                 </div>
               </div>
             ))}

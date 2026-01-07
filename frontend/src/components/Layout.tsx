@@ -56,7 +56,7 @@ export default function Layout() {
               I
             </div>
             <span className="font-semibold text-lg">INFOBI</span>
-            <span className="text-xs text-slate-400">4.0</span>
+            <span className="text-xs text-slate-400">5.0</span>
           </div>
           <button 
             className="lg:hidden p-1 hover:bg-slate-800 rounded"

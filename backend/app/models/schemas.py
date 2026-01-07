@@ -150,3 +150,44 @@ class DashboardResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+# Grid / Server-Side Row Models
+class SortModel(BaseModel):
+    colId: str
+    sort: str  # 'asc' or 'desc'
+
+class FilterModel(BaseModel):
+    filterType: str  # 'text', 'number', 'date'
+    type: str        # 'equals', 'contains', 'greaterThan', etc.
+    filter: Optional[Any] = None
+    filterTo: Optional[Any] = None  # For ranges
+
+class GridRequest(BaseModel):
+    startRow: int = 0
+    endRow: int = 100
+    sortModel: List[SortModel] = []
+    filterModel: Dict[str, FilterModel] = {}
+    groupKeys: List[str] = []
+
+class GridResponse(BaseModel):
+    rows: List[Dict[str, Any]]
+    lastRow: int
+
+# Pivot / Drill-Down Models
+class PivotDrillRequest(BaseModel):
+    # Columns currently in the "Row Groups" area (e.g. ['Region', 'Country'])
+    rowGroupCols: List[str] 
+    # Columns in the "Values" area (e.g. [{'colId': 'Sales', 'aggFunc': 'sum'}])
+    valueCols: List[Dict[str, str]]
+    # Path to the current node being expanded (e.g. ['Europe']) to get its children
+    groupKeys: List[str] 
+    # Filters active globally
+    filterModel: Dict[str, FilterModel] = {}
+    # Sorting
+    sortModel: List[SortModel] = []
+    # If using "Split By" (Pivot Columns)
+    pivotCols: List[str] = []
+    # Start/End for pagination WITHIN the group children (virtual scrolling inside a node)
+    startRow: int = 0
+    endRow: int = 100
+
