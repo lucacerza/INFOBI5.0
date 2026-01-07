@@ -1,5 +1,5 @@
-import { useEffect, useState, useMemo } from 'react';
-import { Loader2, RefreshCw, AlertTriangle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Loader2, AlertTriangle } from 'lucide-react';
 import { tableFromIPC } from 'apache-arrow';
 import { PivotTable } from './PivotTable';
 import { buildPivotHierarchy } from '../utils/pivotLogic';
@@ -7,7 +7,7 @@ import api from '../services/api';
 
 interface PivotConfig {
   group_by: string[];
-  split_by: string[]; // Made array for consistency
+  split_by: string[];
   metrics: Array<{
     name: string;
     field: string;
@@ -25,14 +25,21 @@ interface CustomPivotViewerProps {
 export default function CustomPivotViewer({ reportId, className = '' }: CustomPivotViewerProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<any[]>([]);
-  const [schema, setSchema] = useState<any>(null);
+  
+  // Two modes: 
+  // 1. Flat Data (Client-side aggregation - legacy/small data)
+  const [flatData, setFlatData] = useState<any[]>([]);
+  // 2. Tree Data (Server-side lazy loading)
+  const [treeData, setTreeData] = useState<any[]>([]);
+  const [lazySplitCols, setLazySplitCols] = useState<string[]>([]);
   const [config, setConfig] = useState<PivotConfig>({
     group_by: [],
     split_by: [],
     metrics: [],
     filters: {}
   });
+
+  const isLazy = true; // Enabled by default now
 
   // Load Schema & Initial Data
   useEffect(() => {
@@ -42,24 +49,34 @@ export default function CustomPivotViewer({ reportId, className = '' }: CustomPi
       try {
         setIsLoading(true);
         setError(null);
+        setTreeData([]); 
+        setFlatData([]);
 
         // 1. Fetch Schema
         const { data: schemaData } = await api.get(`/pivot/${reportId}/schema`);
         
         if (mounted) {
-            setSchema(schemaData);
-            
-            // Set defaults
             const newConfig = {
                 group_by: schemaData.default_group_by || [],
-                split_by: [], // TODO: Where to get default split?
+                split_by: schemaData.layout?.split_by || [],
                 metrics: schemaData.default_metrics || [],
                 filters: {}
             };
             setConfig(newConfig);
 
-            // 2. Fetch Data
-            await loadData(newConfig);
+            // 2. Initial Fetch (Root Level)
+            if (isLazy) {
+                // Determine if we have any grouping.
+                if (newConfig.group_by.length > 0) {
+                   await loadLazyLevel(newConfig, {}, 0);
+                } else {
+                   // No grouping, just load data?
+                   // If no grouping, lazy load is meaningless, fall back to flat?
+                   await loadFlatData(newConfig);
+                }
+            } else {
+                await loadFlatData(newConfig);
+            }
         }
       } catch (err: any) {
         if (mounted) setError(err.message || "Failed to load pivot schema");
@@ -72,111 +89,175 @@ export default function CustomPivotViewer({ reportId, className = '' }: CustomPi
     return () => { mounted = false; };
   }, [reportId]);
 
-  const loadData = async (currentConfig: PivotConfig) => {
-    // Prepare request body
-    // Backend expects: group_by, split_by, metrics, filters, sort
-    // Adjust split_by to string if backend expects string
+  // --- LAZY LOADING LOGIC ---
+
+  const loadLazyLevel = async (currentConfig: PivotConfig, parentFilters: Record<string, any>, depth: number, parentNodeId: string | null = null) => {
+      const groupCol = currentConfig.group_by[depth];
+      if (!groupCol) return; 
+
+      const nextDepth = depth + 1;
+      const hasMoreLevels = nextDepth < currentConfig.group_by.length;
+
+      // Request only THIS level
+      const requestBody = {
+        group_by: [groupCol], 
+        split_by: currentConfig.split_by[0] || null,
+        metrics: currentConfig.metrics,
+        filters: { ...currentConfig.filters, ...parentFilters },
+        sort: [] // TODO: Add sort
+      };
+
+      try {
+        const res = await api.post(`/pivot/${reportId}`, requestBody, {
+            responseType: 'arraybuffer'
+        });
+
+        const table = tableFromIPC(res.data);
+        const rows = table.toArray().map(r => r.toJSON());
+        
+        // Use pivotLogic helper to organize these rows into nodes (handling splitBy aggregation)
+        const metricNames = currentConfig.metrics.map(m => m.field);
+        
+        // buildPivotHierarchy returns Root -> [Nodes]
+        // We only care about [Nodes] (the children of the temporary root)
+        const { tree: chunkTree, splitColumns } = buildPivotHierarchy(rows, [groupCol], currentConfig.split_by, metricNames);
+        
+        // chunkTree[0] is the "Grand Total". We want its children.
+        const nodes = chunkTree[0]?.subRows || [];
+
+        // Post-process nodes
+        const processNodes = (n: any) : any => {
+            return {
+                ...n,
+                _depth: depth + 1, // Visual depth
+                _hasChildren: hasMoreLevels, 
+                subRows: [] // Start empty
+            };
+        };
+
+        const processedNodes = nodes.map(processNodes);
+
+        // Update Tree Data
+        if (parentNodeId === null) {
+             // Root load
+             setTreeData(processedNodes);
+        } else {
+             // Append to parent
+             setTreeData(prev => {
+                // Deep clone to safely mutate
+                const updateTree = (list: any[]): any[] => {
+                    return list.map(node => {
+                        if (node._id === parentNodeId) {
+                            // Fix children IDs to include parent path
+                            const childrenWithPaths = processedNodes.map((child: any) => ({
+                                ...child,
+                                _id: `${parentNodeId}|||${child._label}`
+                            }));
+                            return { 
+                                ...node, 
+                                subRows: childrenWithPaths
+                            };
+                        }
+                        if (node.subRows && node.subRows.length > 0) {
+                            return { ...node, subRows: updateTree(node.subRows) };
+                        }
+                        return node;
+                    });
+                };
+                
+                return updateTree(prev);
+            });
+        }
+        
+        setLazySplitCols(prev => Array.from(new Set([...prev, ...splitColumns])).sort());
+
+      } catch (err) {
+          console.error("Lazy Load Error", err);
+      }
+  };
+
+  const handleExpand = (node: any) => {
+      // If node already has fetched children, don't refetch
+      if (node.subRows && node.subRows.length > 0) return;
+
+      // Node depth indicates which group level it belongs to
+      // Root children (Year) have depth 1. They map to group_by[0].
+      // We want to load group_by[1].
+      // So index to load is `node._depth`.
+      // Example: Year (depth 1) -> expand -> load group_by[1] (Supplier)
+      
+      const nextLevelIndex = node._depth;
+      
+      const pathParts = String(node._id).split("|||");
+      const filters: Record<string, any> = {};
+      
+      // Reconstruct filters from path
+      pathParts.forEach((part, index) => {
+          if (index < config.group_by.length) {
+              const col = config.group_by[index];
+              filters[col] = { value: part, type: 'equals' }; 
+          }
+      });
+
+      loadLazyLevel(config, filters, nextLevelIndex, node._id);
+  };
+
+  const loadFlatData = async (currentConfig: PivotConfig) => {
     const requestBody = {
         group_by: currentConfig.group_by,
-        split_by: currentConfig.split_by[0] || null, // Backend currently takes single split string?
+        split_by: currentConfig.split_by[0] || null,
         metrics: currentConfig.metrics,
         filters: currentConfig.filters,
-        sort: [] // TODO: Add sort support
+        sort: []
     };
 
     try {
         const res = await api.post(`/pivot/${reportId}`, requestBody, {
             responseType: 'arraybuffer'
         });
-
-        // Read Arrow Stream
-        const arrayBuffer = res.data;
-        const table = tableFromIPC(arrayBuffer); // Apache Arrow handles ArrayBuffer
+        const table = tableFromIPC(res.data);
         const rows = table.toArray().map(r => r.toJSON());
-        
-        console.log("Loaded Rows:", rows.length);
-        setData(rows);
+        setFlatData(rows);
     } catch (err: any) {
-        throw new Error(err.response?.data?.detail || err.message || "Error loading pivot data");
+        throw new Error(err.response?.data?.detail || err.message);
     }
   };
 
-  // Transform Data for PivotTable
-  const { treeData, columns } = useMemo(() => {
-    if (!data.length || !config) return { treeData: [], columns: [] };
-
-    // Use our logic to build the tree
-    // metrics list of field names
-    const metricFields = config.metrics.map(m => m.name || m.field); // pivot logic needs identification
-    
-    // Call the builder
-    const { tree, splitColumns } = buildPivotHierarchy(
-        data, 
-        config.group_by, 
-        config.split_by, 
-        metricFields
-    );
-    
-    return { treeData: tree, splitColumns };
-  }, [data, config]);
-
-
-  if (isLoading && !data.length) {
-    return (
-      <div className={`flex items-center justify-center bg-gray-50 border rounded-lg ${className}`}>
-        <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
-        <span className="ml-2 text-gray-500">Caricamento Pivot...</span>
-      </div>
-    );
-  }
-
   if (error) {
     return (
-      <div className={`flex flex-col items-center justify-center bg-red-50 border border-red-200 rounded-lg p-6 ${className}`}>
-        <AlertTriangle className="w-10 h-10 text-red-500 mb-2" />
-        <h3 className="text-lg font-semibold text-red-700">Errore Caricamento</h3>
-        <p className="text-red-600 mb-4">{error}</p>
-        <button 
-            onClick={() => window.location.reload()}
-            className="px-4 py-2 bg-white border border-red-300 rounded text-red-700 hover:bg-red-50"
-        >
-            Riprova
-        </button>
+      <div className="flex flex-col items-center justify-center h-full text-red-500 gap-2">
+        <AlertTriangle size={32} />
+        <p>{error}</p>
       </div>
     );
   }
 
   return (
-    <div className={`flex flex-col ${className}`}>
-        {/* Controls / Config Bar could go here */}
-        
-        <div className="flex-1 overflow-hidden relative">
-            <PivotTable 
-                data={data} // Passing raw data? No, PivotTable expects prepared data? 
-                // Wait, PivotTable implementation I wrote took (data, groupBy, splitBy) and did memo inside.
-                // But specifically for 'buildPivotHierarchy', I put it in a utility. 
-                // Let's verify PivotTable.tsx content.
-                // PivotTable.tsx: "const { tableData, tableColumns } = useMemo(...)".
-                // It calls "Placeholder transformation logic".
-                // I should update PivotTable.tsx to use the Real Logic from props or utility.
-                
-                // Let's pass the raw props and let PivotTable use the utility, 
-                // OR process here and pass Processed data.
-                // The PivotTable I wrote earlier had 'data' prop as "any[] // Raw flat data".
-                // So I can pass 'data' (the flat rows) and 'groupBy'/'splitBy'.
-                // And inside PivotTable I should import 'buildPivotHierarchy'.
-                
-                groupBy={config.group_by}
-                splitBy={config.split_by}
-                metrics={config.metrics.map(m => ({ field: m.name || m.field, aggregation: m.aggregation || 'SUM' }))}
-            />
+    <div className={`relative h-full w-full ${className}`}>
+      {isLoading && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-white/50 backdrop-blur-sm">
+          <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
         </div>
-        
-        {/* Footer Stats */}
-        <div className="bg-white border-t p-2 text-xs text-gray-500 flex justify-between">
-            <span>Righe: {data.length.toLocaleString()}</span>
-            <span>Raggruppamenti: {config.group_by.join(', ') || 'Nessuno'}</span>
-        </div>
+      )}
+
+      {isLazy ? (
+          <PivotTable 
+            treeData={treeData} 
+            groupBy={config.group_by}
+            splitBy={config.split_by}
+            splitColumnValues={lazySplitCols}
+            metrics={config.metrics.map(m => ({ field: m.field, aggregation: m.aggregation || 'SUM' }))}
+            onExpand={handleExpand}
+            isLoading={isLoading}
+          />
+      ) : (
+          <PivotTable 
+            data={flatData}
+            groupBy={config.group_by}
+            splitBy={config.split_by}
+            metrics={config.metrics.map(m => ({ field: m.field, aggregation: m.aggregation || 'SUM' }))}
+          />
+      )}
     </div>
   );
 }

@@ -16,6 +16,7 @@ export interface PivotProps {
   treeData?: any[]; // Pre-built tree data (for lazy loading)
   groupBy: string[];
   splitBy: string[];
+  splitColumnValues?: string[]; // Unique values for split columns (needed for lazy mode)
   metrics: { field: string; aggregation: string }[];
   onExpand?: (node: any) => void;
   isLoading?: boolean;
@@ -88,7 +89,7 @@ function buildGroupedColumns(
   return recurse(rootGroup);
 }
 
-export function PivotTable({ data, treeData, groupBy, splitBy, metrics, onExpand, isLoading }: PivotProps) {
+export function PivotTable({ data, treeData, groupBy, splitBy, splitColumnValues, metrics, onExpand, isLoading }: PivotProps) {
   const [expanded, setExpanded] = useState({ root: true });
 
   // 1. Build Data & Stats
@@ -148,18 +149,21 @@ export function PivotTable({ data, treeData, groupBy, splitBy, metrics, onExpand
             }
         });
 
-        // Metrics (Simplification: assuming no SplitBy for lazy mode or handled elsewhere for now)
-        // If SplitBy is active, we need to know the columns. 
-        // We can pass `columns` as prop? Or deduce from first row?
-        // Let's just handle standard metrics for now.
-        metrics.forEach(metric => {
-            cols.push({
-                accessorKey: metric.field,
-                header: metric.field,
-                size: 100,
-                cell: info => <div className="text-right tabular-nums text-[10px] w-full px-1">{info.getValue() as number ?? "-"}</div>
+        // Metrics & Splits for Lazy/Tree Mode
+        if (splitBy.length > 0 && splitColumnValues && splitColumnValues.length > 0) {
+            // Use same builder as client-side, but with empty width map for now
+            const groupedCols = buildGroupedColumns(metrics, splitColumnValues, {});
+            cols.push(...groupedCols);
+        } else {
+             metrics.forEach(metric => {
+                cols.push({
+                    accessorKey: metric.field,
+                    header: metric.field,
+                    size: 100,
+                    cell: info => <div className="text-right tabular-nums text-[10px] w-full px-1">{info.getValue() as number ?? "-"}</div>
+                });
             });
-        });
+        }
         
         return { tableData: treeData, tableColumns: cols };
     }
