@@ -12,10 +12,13 @@ import { ArrowDown, ArrowRight } from "lucide-react";
 
 // Types for our custom pivot
 export interface PivotProps {
-  data: any[]; // Raw flat data from Arrow
-  groupBy: string[]; // Row groups
-  splitBy: string[]; // Column groups (pivot columns)
+  data?: any[]; // Raw flat data
+  treeData?: any[]; // Pre-built tree data (for lazy loading)
+  groupBy: string[];
+  splitBy: string[];
   metrics: { field: string; aggregation: string }[];
+  onExpand?: (node: any) => void;
+  isLoading?: boolean;
 }
 
 // Helper to recursively build grouped columns
@@ -85,11 +88,83 @@ function buildGroupedColumns(
   return recurse(rootGroup);
 }
 
-export function PivotTable({ data, groupBy, splitBy, metrics }: PivotProps) {
+export function PivotTable({ data, treeData, groupBy, splitBy, metrics, onExpand, isLoading }: PivotProps) {
   const [expanded, setExpanded] = useState({ root: true });
 
   // 1. Build Data & Stats
   const { tableData, tableColumns } = useMemo(() => {
+    // LAZY / TREE MODE
+    if (treeData) {
+        // Reuse similar column logic but skip hierarchy building
+        // We need to calculate columns based on metrics and (potentially) splitBy found in tree
+        // For now, assume splitBy logic is similar or we use what we have.
+        // We do need `colWidths` logic here too if we want auto-sizing.
+        // For lazy loading, we might just use fixed widths or Recalculate based on visible.
+        
+        // Dynamic Columns creation
+        const cols: ColumnDef<any>[] = [];
+
+        // Hierarchy Column
+        cols.push({
+            id: 'hierarchy',
+            header: '',
+            accessorFn: row => row._label,
+            size: 250, 
+            cell: ({ row }) => {
+                const label = String(row.original._label || "Total");
+                const cleanedLabel = label.includes("|||") ? label.split("|||").pop() : label;
+                const hasChildren = row.original._hasChildren || row.subRows?.length > 0;
+                
+                return (
+                    <div
+                        style={{
+                            paddingLeft: `${row.depth * 1.25}rem`,
+                        }}
+                        className="flex items-center gap-1 w-full h-full"
+                    >
+                        {/* Always show expander if it says it has children, even if local subRows are empty (Lazy) */}
+                        {(hasChildren || row.getCanExpand()) ? (
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    row.toggleExpanded();
+                                    if (!row.getIsExpanded() && onExpand) {
+                                         onExpand(row.original);
+                                    }
+                                }}
+                                style={{ cursor: "pointer" }}
+                                className="w-4 h-4 flex-shrink-0 flex items-center justify-center rounded hover:bg-gray-200 text-gray-500"
+                            >
+                                {row.getIsExpanded() ? <ArrowDown size={10} /> : <ArrowRight size={10} />}
+                            </button>
+                        ) : (
+                            <span className="w-4 flex-shrink-0"></span>
+                        )}
+                        <span className="font-medium text-gray-800 text-[10px] truncate" title={label}>
+                             {cleanedLabel}
+                        </span>
+                    </div>
+                );
+            }
+        });
+
+        // Metrics (Simplification: assuming no SplitBy for lazy mode or handled elsewhere for now)
+        // If SplitBy is active, we need to know the columns. 
+        // We can pass `columns` as prop? Or deduce from first row?
+        // Let's just handle standard metrics for now.
+        metrics.forEach(metric => {
+            cols.push({
+                accessorKey: metric.field,
+                header: metric.field,
+                size: 100,
+                cell: info => <div className="text-right tabular-nums text-[10px] w-full px-1">{info.getValue() as number ?? "-"}</div>
+            });
+        });
+        
+        return { tableData: treeData, tableColumns: cols };
+    }
+
+    // CLIENT SIDE MODE (Original)
     if (!data || data.length === 0) return { tableData: [], tableColumns: [] };
 
     // RAW DATA MODE
